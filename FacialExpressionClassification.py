@@ -2,26 +2,36 @@ import cv2 as cv
 import sys
 import joblib
 import numpy as np
+import time # 导入time模块用于测量延迟
 from skimage.feature import local_binary_pattern, hog
 from tensorflow.keras.models import load_model
 from FaceDetector.DNN_FaceDetector import DnnDetector
 
+# ----------------------------------------------------------------------
+# 1. 全局变量/配置 (移除单模型选择的 Trackbar 相关变量)
+# ----------------------------------------------------------------------
 CAM_INDEX = 0  # Change this if you have multiple cameras
 
-windows_name = "Facial Emotion Recognition"
+windows_name = "Facial Emotion Recognition - Triple Model Output" # 更改窗口名称
 
-TB_Model = "Model 0:KNN 1:SVM 2:Mini-Xception"
-TB_Model_max_value = 2
-TB_Model_default = 2
-
-model = TB_Model_default
+# TB_Model, TB_Model_max_value, TB_Model_default, model = [REMOVED]
 
 FACE_DETECTOR_ROOT = "FaceDetector"
 dnn_detector = DnnDetector(root = FACE_DETECTOR_ROOT)
 
+# 情绪类别
 CLASSES = {0: 'Angry', 1: 'Disgust', 2: 'Fear', 3: 'Happy', 4: 'Sad', 5: 'Surprise', 6: 'Neutral'}
 
+# 全局模型变量
+knn_model = None
+svm_model = None
+lbp_scaler = None
+hog_scaler = None
+mini_x_model = None
+
+
 def load_models():
+    """加载所有模型和 Scalers"""
     global knn_model, svm_model, lbp_scaler, hog_scaler, mini_x_model
 
     knn_model_path = "Model/knn_lbp_model.joblib"
@@ -31,34 +41,39 @@ def load_models():
     mini_x_path = "Model/best_model.keras"
 
     try:
+        # NOTE: KNN model is loaded. For confidence, we'll try predict_proba.
         knn_model = joblib.load(knn_model_path)
         print("[INFO] KNN model loaded:", knn_model_path)
     except Exception as e:
-        print("[WARN] Fail to load KNN model:", e)
+        print(f"[WARN] Fail to load KNN model: {e}")
 
     try:
+        # NOTE: SVM model is loaded. For confidence, we'll try predict_proba, which requires probability=True in training.
         svm_model = joblib.load(svm_model_path)
         print("[INFO] SVM model loaded:", svm_model_path)
     except Exception as e:
-        print("[WARN] Fail to load SVM model:", e)
+        print(f"[WARN] Fail to load SVM model: {e}")
 
     try:
         lbp_scaler = joblib.load(lbp_scaler_path)
         print("[INFO] LBP Scaler loaded:", lbp_scaler_path)
     except Exception as e:
-        print("[WARN] Fail to load LBP scaler:", e)
+        print(f"[WARN] Fail to load LBP scaler: {e}")
 
     try:
         hog_scaler = joblib.load(hog_scaler_path)
         print("[INFO] HOG Scaler loaded:", hog_scaler_path)
     except Exception as e:
-        print("[WARN] Fail to load HOG scaler:", e)
+        print(f"[WARN] Fail to load HOG scaler: {e}")
 
     try:
         mini_x_model = load_model(mini_x_path)
         print("[INFO] Mini-Xception model loaded:", mini_x_path)
     except Exception as e:
-        print("[WARN] Fail to load Mini-Xception model:", e)
+        print(f"[WARN] Fail to load Mini-Xception model: {e}")
+
+
+# --- (initialize_stream, grab_preprocess, load_images, CreateGUI, LBP_Features_extract, HOG_Features_extract remain UNCHANGED or REMOVED) ---
 
 def initialize_stream():
     global cap
@@ -101,28 +116,11 @@ def grab_preprocess():
         frame_gray = cv.cvtColor(frame_in, cv.COLOR_BGR2GRAY)
     return True
 
-def load_images(image_path):
-    img = cv.imread(image_path)
-    if img is None:
-        print(f"[ERROR] Cannot read image: {image_path}")
-        return
+# NOTE: Since we are running triple prediction in one function, 
+# the individual 'predict_emotion_knn', 'predict_emotion_svm', 'predict_emotion_minix' are not needed, 
+# but we'll keep them for the classify_image function if needed.
+# For the main loop, we'll use a new function that returns confidence and latency.
 
-    # Work on copies
-    display_frame = img.copy()
-    if display_frame.ndim == 2 or display_frame.shape[2] == 1:
-        gray = display_frame if display_frame.ndim == 2 else cv.cvtColor(display_frame, cv.COLOR_BGR2GRAY)
-    else:
-        gray = cv.cvtColor(display_frame, cv.COLOR_BGR2GRAY)
-    
-    return display_frame, gray
-
-
-def CreateGUI():
-    
-    global model
-    cv.namedWindow(windows_name, cv.WINDOW_NORMAL)
-
-    cv.createTrackbar(TB_Model, windows_name, int(model), TB_Model_max_value, process_display_callback)
 
 def LBP_Features_extract(image):
     height,width = (48,48)
@@ -163,56 +161,203 @@ def HOG_Features_extract(image):
                        channel_axis=None)
     HOG_FEATURES = np.array(HOG_FEATURES,dtype = np.float32)
     return HOG_FEATURES
-    
 
-def predict_emotion_knn(lbp_features):
-    if knn_model is None or lbp_scaler is None:
-        return "KNN Not Loaded"
-    feature = lbp_features.reshape(1,-1).astype("float32")
-    feature_scaled = lbp_scaler.transform(feature)
-    y_pred = knn_model.predict(feature_scaled)[0]
-    return CLASSES.get(int(y_pred), str(y_pred))
+# ----------------------------------------------------------------------
+# 2. 新预测函数: 包含置信度和延迟
+# ----------------------------------------------------------------------
+def classify_face_all_models_with_metrics(face_resized):
+    results = {}
 
-def predict_emotion_svm(hog_features):
-    if svm_model is None or hog_scaler is None:
-        return "SVM-NotLoaded"
-
-    feature = hog_features.reshape(1, -1).astype("float32")
-    feature_scaled = hog_scaler.transform(feature)
-    y_pred = svm_model.predict(feature_scaled)[0]
-    return CLASSES.get(int(y_pred), str(y_pred))
-
-def predict_emotion_minix(face_gray):
-    if mini_x_model is None:
-        return "MiniX-NotLoaded"
-
-    face_norm = face_gray.astype("float32") / 255.0
-    face_input = face_norm.reshape(1, 48, 48, 1)
-    probs = mini_x_model.predict(face_input, verbose=0)[0]
-    cls_id = int(np.argmax(probs))
-    return CLASSES.get(cls_id, str(cls_id))
-               
-
-def classify_face_all_models(face_resized):
-
+    # --- KNN Prediction ---
+    start_time_knn = time.time()
     if (knn_model is not None) and (lbp_scaler is not None):
         lbp_features = LBP_Features_extract(face_resized)
-        label_knn = predict_emotion_knn(lbp_features)
+        feature = lbp_features.reshape(1,-1).astype("float32")
+        feature_scaled = lbp_scaler.transform(feature)
+        
+        try:
+            probs = knn_model.predict_proba(feature_scaled)[0]
+            cls_id = int(np.argmax(probs))
+            confidence = probs[cls_id]
+            label = CLASSES.get(cls_id, str(cls_id))
+        except AttributeError:
+            # Fallback if predict_proba is not available
+            y_pred = knn_model.predict(feature_scaled)[0]
+            label = CLASSES.get(int(y_pred), str(y_pred))
+            confidence = 1.0 # Placeholder for unavailable confidence
+        except Exception:
+            label = "KNN Err"
+            confidence = 0.0
     else:
-        label_knn = "KNN N/A"
+        label = "KNN N/A"
+        confidence = 0.0
+    end_time_knn = time.time()
+    latency_knn = (end_time_knn - start_time_knn) * 1000 # ms
+    results["KNN"] = {"label": label, "conf": confidence, "ms": latency_knn}
 
+    # --- SVM Prediction ---
+    start_time_svm = time.time()
     if (svm_model is not None) and (hog_scaler is not None):
         hog_features = HOG_Features_extract(face_resized)
-        label_svm = predict_emotion_svm(hog_features)
+        feature = hog_features.reshape(1, -1).astype("float32")
+        feature_scaled = hog_scaler.transform(feature)
+        
+        try:
+            # NOTE: Assumes SVM model was trained with probability=True
+            probs = svm_model.predict_proba(feature_scaled)[0] 
+            cls_id = int(np.argmax(probs))
+            confidence = probs[cls_id]
+            label = CLASSES.get(cls_id, str(cls_id))
+        except AttributeError:
+            # Fallback
+            y_pred = svm_model.predict(feature_scaled)[0]
+            label = CLASSES.get(int(y_pred), str(y_pred))
+            confidence = 1.0 # Placeholder
+        except Exception:
+            label = "SVM Err"
+            confidence = 0.0
     else:
-        label_svm = "SVM N/A"
+        label = "SVM N/A"
+        confidence = 0.0
+    end_time_svm = time.time()
+    latency_svm = (end_time_svm - start_time_svm) * 1000 # ms
+    results["SVM"] = {"label": label, "conf": confidence, "ms": latency_svm}
 
-    label_minix = predict_emotion_minix(face_resized)
+    # --- Mini-Xception Prediction ---
+    start_time_minix = time.time()
+    if mini_x_model is not None:
+        try:
+            face_norm = face_resized.astype("float32") / 255.0
+            face_input = face_norm.reshape(1, 48, 48, 1)
+            probs = mini_x_model.predict(face_input, verbose=0)[0]
+            cls_id = int(np.argmax(probs))
+            confidence = probs[cls_id]
+            label = CLASSES.get(cls_id, str(cls_id))
+        except Exception:
+            label = "MiniX Err"
+            confidence = 0.0
+    else:
+        label = "MiniX N/A"
+        confidence = 0.0
+    end_time_minix = time.time()
+    latency_minix = (end_time_minix - start_time_minix) * 1000 # ms
+    results["MiniX"] = {"label": label, "conf": confidence, "ms": latency_minix}
 
+    return results
+
+# ----------------------------------------------------------------------
+# 3. GUI 和显示修改 (移除 Trackbar, 修改 process_display)
+# ----------------------------------------------------------------------
+
+def CreateGUI():
+    """仅创建窗口，移除 Trackbar"""
+    cv.namedWindow(windows_name, cv.WINDOW_NORMAL)
+    cv.setWindowTitle(windows_name, windows_name) # 确保标题正确
+
+# NOTE: process_display_callback and its related code is REMOVED/DELETED
+
+def process_display():
+    """检测人脸，运行所有模型并显示结果"""
+    global frame_in, frame_gray
+    
+    # Display the frame
+    display_frame = frame_in.copy()
+    gray = frame_gray
+    
+    # --- Face Detection ---
+    faces = dnn_detector.detect_faces(display_frame)
+
+    for (x, y, w, h) in faces:
+        x1, y1 = max(0, x), max(0, y)
+        x2, y2 = min(display_frame.shape[1], x + w), min(display_frame.shape[0], y + h)
+
+        face_roi_gray = gray[y1:y2, x1:x2]
+        if face_roi_gray.size == 0:
+            continue
+
+        # --- Pipeline: Crop/Align -> Resize (48x48) -> Run all 3 ---
+        face_resized = cv.resize(face_roi_gray, (48, 48))
+        
+        # --- Run all 3 models ---
+        results = classify_face_all_models_with_metrics(face_resized)
+        
+        # --- Drawing the results (Box and Text) ---
+        cv.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 0), 2) # Draw face box
+
+        text_lines = [
+            f"KNN: {results['KNN']['label']} ({results['KNN']['conf']:.2f}, {results['KNN']['ms']:.1f}ms)",
+            f"SVM: {results['SVM']['label']} ({results['SVM']['conf']:.2f}, {results['SVM']['ms']:.1f}ms)",
+            f"MiniX: {results['MiniX']['label']} ({results['MiniX']['conf']:.2f}, {results['MiniX']['ms']:.1f}ms)",
+        ]
+
+        # Determine where to put the text box (above or below the face)
+        line_height = 18
+        box_height = len(text_lines) * line_height + 5
+        start_y = y1 - box_height
+        
+        # Adjust position if box goes out of frame at the top
+        if start_y < 0:
+            start_y = y2 + 5 
+
+        # Draw a background box for the text
+        box_x2 = x1 + max(len(line) for line in text_lines) * 10 + 10 # Estimate box width
+        cv.rectangle(display_frame, (x1, start_y), (box_x2, start_y + box_height), (50, 50, 50), -1)
+
+        # Write text lines
+        for i, line in enumerate(text_lines):
+            ty = start_y + (i * line_height) + line_height - 5
+            cv.putText(display_frame, line, (x1 + 5, ty),
+                       cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv.LINE_AA)
+            
+    cv.imshow(windows_name, display_frame)
+
+
+# ----------------------------------------------------------------------
+# 4. 主循环修改
+# ----------------------------------------------------------------------
+def video_classification():
+    initialize_stream()
+    CreateGUI() # 仅创建窗口
+
+    while True:
+        if not grab_preprocess():
+            break
+
+        process_display() # 调用新的显示函数
+
+        if cv.waitKey(5) >=0:
+            break
+
+    cap.release()
+    cv.destroyAllWindows()
+
+
+# --- (classify_image function remains UNCHANGED for image mode) ---
+
+def load_images(image_path):
+    img = cv.imread(image_path)
+    if img is None:
+        print(f"[ERROR] Cannot read image: {image_path}")
+        return
+
+    # Work on copies
+    display_frame = img.copy()
+    if display_frame.ndim == 2 or display_frame.shape[2] == 1:
+        gray = display_frame if display_frame.ndim == 2 else cv.cvtColor(display_frame, cv.COLOR_BGR2GRAY)
+    else:
+        gray = cv.cvtColor(display_frame, cv.COLOR_BGR2GRAY)
+    
+    return display_frame, gray
+
+def classify_face_all_models(face_resized):
+    # This is a legacy function for the image mode's console output, kept for minimal disruption.
+    
+    results = classify_face_all_models_with_metrics(face_resized)
+    
     return {
-        "KNN": label_knn,
-        "SVM": label_svm,
-        "MiniX": label_minix
+        "KNN": f"{results['KNN']['label']} (Conf:{results['KNN']['conf']:.2f}, MS:{results['KNN']['ms']:.1f})",
+        "SVM": f"{results['SVM']['label']} (Conf:{results['SVM']['conf']:.2f}, MS:{results['SVM']['ms']:.1f})",
+        "MiniX": f"{results['MiniX']['label']} (Conf:{results['MiniX']['conf']:.2f}, MS:{results['MiniX']['ms']:.1f})"
     }
 
 def classify_image(image_path):
@@ -235,13 +380,15 @@ def classify_image(image_path):
 
             face_resized = cv.resize(face_roi_gray, (48, 48))
 
+            # 使用带有 metrics 的函数，但格式化为 image mode 的输出
             results = classify_face_all_models(face_resized)
             face_id += 1
 
             print(f"\n[FACE {face_id}]")
             for k, v in results.items():
                 print(f"  {k}: {v}")
-
+                
+            # --- Drawing for image mode ---
             cv.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
             text_lines = [
@@ -258,87 +405,16 @@ def classify_image(image_path):
             for i, line in enumerate(text_lines):
                 ty = start_y - i * line_height if start_y == y1 - 5 else start_y + i * line_height
                 cv.putText(display_frame, line, (x1 + 5, ty),
-                           cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv.LINE_AA)
+                            cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv.LINE_AA)
 
     cv.imshow(windows_name, display_frame)
     print("[INFO] Press any key on the image window to close.")
     cv.waitKey(0)
     cv.destroyAllWindows()
 
-def process_display():
-    global frame_in, frame_gray
-    
-    # Display the frame
-    display_frame = frame_in.copy()
-    gray = frame_gray
-    
-
-    faces = dnn_detector.detect_faces(display_frame)
-
-    for (x, y, w, h) in faces:
-        x1, y1 = max(0, x), max(0, y)
-        x2, y2 = min(display_frame.shape[1], x + w), min(display_frame.shape[0], y + h)
-
-        face_roi_gray = gray[y1:y2, x1:x2]
-        if face_roi_gray.size == 0:
-            continue
-
-        face_resized = cv.resize(face_roi_gray, (48, 48))
-
-        if model == 0:
-            lbp_features = LBP_Features_extract(face_resized)
-            label = predict_emotion_knn(lbp_features)
-        elif model == 1:
-            hog_features = HOG_Features_extract(face_resized)
-            label = predict_emotion_svm(hog_features)
-        else:
-            label = predict_emotion_minix(face_resized)
-
-        cv.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-        cv.rectangle(display_frame, (x1, y1 - 20), (x1 + 160, y1), (50, 50, 50), -1)
-        cv.putText(display_frame, label, (x1 + 5, y1 - 5),
-                   cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
-
-
-
-    cv.imshow(windows_name, display_frame)
-
-
-def process_display_callback(value):
-    global model
-    TB_Model_value = cv.getTrackbarPos(TB_Model, windows_name)
-    model = TB_Model_value
-    model_names = {0:"KNN", 1:"SVM", 2:"Mini-Xception"}
-    model_name = model_names.get(model,str(model))
-    title_text = (f"{windows_name} | Model ={model_name}")
-    cv.setWindowTitle(windows_name,title_text)
-
-    process_display()
-
-
-def video_classification():
-    initialize_stream()
-    grab_preprocess()
-    CreateGUI()
-    process_display_callback(0)
-
-    while True:
-        if not grab_preprocess():
-            break
-
-        process_display()
-
-        if cv.waitKey(5) >=0:
-            break
-
-    cap.release()
-    cv.destroyAllWindows()
-
-    
-
 
 if __name__ == "__main__":
-   
+    
     load_models()
 
     

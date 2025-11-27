@@ -23,7 +23,9 @@ Face detection uses **OpenCV DNN (SSD ResNet-10 model)**.
 
 ##  Demo (Webcam Interface)
 
-https://github.com/knight-hollow/Facial-Expression-Classification/result/videoresult.mp4
+<p align="center">
+  <img src="result/output.gif" width="400">
+</p>
 
 ---
 
