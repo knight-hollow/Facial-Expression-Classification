@@ -117,9 +117,9 @@ The data consists of **48x48 pixel grayscale** images of faces. and their emotio
 
 | **Model**               | **Validate-Accuracy**      | **Latency**               |
 |-------------------------|----------------------------|---------------------------|
-| **LBP + KNN**           | 0.41                       | 0.7979ms                  |
-| **HOG + SVM (OvR)**     | 0.42                       | 0.0101                    |
-| **Mini-Xception (CNN)** | 0.63                       | 0.2276                    |
+| **LBP + KNN**           | 0.41                       | 89.56                  |
+| **HOG + SVM (OvR)**     | 0.42                       | 4.4                    |
+| **Mini-Xception (CNN)** | 0.63                       | 514.12                    |
 
 ## Confusion Matrix
 
